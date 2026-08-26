@@ -222,10 +222,11 @@ with col1:
         errs.append(t_crit * se)
     ax1.bar(strategies, means, yerr=errs, capsize=8, color=palette[:len(strategies)], alpha=0.85)
     ax1.axhline(0, color="gray", linewidth=0.8)
-    ax1.set_ylabel(f"Sharpe ratio (เฉลี่ยจาก {n_folds} รอบ)")
-    ax1.set_title("Sharpe ratio พร้อมช่วงความเชื่อมั่น 95%")
+    ax1.set_ylabel(f"Sharpe ratio (mean of {n_folds} folds)")
+    ax1.set_title("Sharpe ratio with 95% confidence interval")
     plt.setp(ax1.get_xticklabels(), rotation=15)
     st.pyplot(fig1)
+    st.caption(f"Sharpe ratio เฉลี่ยจาก {n_folds} รอบ พร้อมช่วงความเชื่อมั่น 95% (เส้นขีดบนแท่ง)")
 
 with col2:
     fig2, ax2 = plt.subplots(figsize=(6, 4.5))
@@ -233,14 +234,15 @@ with col2:
     w_bar = 0.35
     ret_pct = summary["ann_return"].values * 100
     dd_pct = summary["max_drawdown"].values * 100
-    ax2.bar(x - w_bar / 2, ret_pct, w_bar, label="ผลตอบแทน/ปี (%)", color="#2ca02c")
-    ax2.bar(x + w_bar / 2, dd_pct, w_bar, label="Max Drawdown (%)", color="#d62728")
+    ax2.bar(x - w_bar / 2, ret_pct, w_bar, label="Annual return (%)", color="#2ca02c")
+    ax2.bar(x + w_bar / 2, dd_pct, w_bar, label="Max drawdown (%)", color="#d62728")
     ax2.axhline(0, color="gray", linewidth=0.8)
     ax2.set_xticks(x)
     ax2.set_xticklabels(strategies, rotation=15)
-    ax2.set_title("ผลตอบแทน เทียบกับ ความเสี่ยง (Drawdown)")
+    ax2.set_title("Return vs. Drawdown (risk)")
     ax2.legend()
     st.pyplot(fig2)
+    st.caption("เขียว = ผลตอบแทนเฉลี่ยต่อปี, แดง = ขาดทุนสูงสุดที่เคยเกิดขึ้น (Max Drawdown)")
 
 # ---------- นัยสำคัญทางสถิติ ----------
 st.subheader("ผลต่างระหว่างกลยุทธ์ เชื่อถือได้แค่ไหน (Paired t-test)")
