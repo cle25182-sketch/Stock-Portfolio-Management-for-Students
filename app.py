@@ -12,10 +12,6 @@ st.set_page_config(page_title="จัดพอร์ตหุ้นฉบับ�
 
 RF_RATE = 0.0
 
-# ------------------------------------------------------------------
-# ส่วนคำนวณ
-# ------------------------------------------------------------------
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_price_data(tickers, years_back):
     import yfinance as yf
@@ -24,8 +20,7 @@ def load_price_data(tickers, years_back):
     raw = yf.download(list(tickers), start=start_date, end=end_date, progress=False, auto_adjust=True)["Close"]
     if isinstance(raw, pd.Series):
         raw = raw.to_frame(tickers[0])
-    # ตลาดต่างประเทศมีวันหยุดคนละวัน (เช่น SET ปิดวันหนึ่ง แต่ NYSE เปิด) -- forward-fill
-    # ราคาล่าสุดแทนที่จะทิ้งทั้งแถว ไม่งั้นข้อมูลจะหายเยอะเกินไปเมื่อผสมหลายตลาด
+ 
     raw = raw.ffill()
     valid = [t for t in tickers if t in raw.columns and raw[t].notna().sum() >= 30]
     return raw[valid].dropna(), valid
@@ -95,10 +90,6 @@ def run_walk_forward(data, shares_arr, use_marketcap, train_window, test_window)
         start += test_window
     return pd.DataFrame(records), round_num, failed
 
-
-# ------------------------------------------------------------------
-# UI
-# ------------------------------------------------------------------
 
 st.title("📈 เว็บแอปจัดพอร์ตหุ้นฉบับนักเรียน")
 st.caption(
@@ -179,7 +170,6 @@ st.success(f"วิเคราะห์เสร็จแล้ว — ทด�
 if n_failed:
     st.caption(f"หมายเหตุ: การหาค่าเหมาะสมที่สุดไม่ลู่เข้าใน {n_failed}/{n_folds} รอบ (ใช้ equal-weight แทนในรอบนั้น)")
 
-# ---------- ตารางสรุป ----------
 st.subheader("สรุปผลแต่ละกลยุทธ์ (ค่าเฉลี่ยตลอดทุกรอบ)")
 summary = df.groupby("strategy")[["ann_return", "ann_vol", "sharpe", "max_drawdown"]].mean().reindex(strategies)
 
@@ -200,7 +190,6 @@ st.caption(
     f"ปีจริงจะไม่เท่ากันเป๊ะ นี่คือค่าเฉลี่ยจากอดีตเท่านั้น ไม่ใช่การรับประกัน)"
 )
 
-# ---------- กราฟ ----------
 col1, col2 = st.columns(2)
 palette = ["#1f77b4", "#ff7f0e", "#2ca02c"]
 
@@ -238,7 +227,7 @@ with col2:
     st.pyplot(fig2)
     st.caption("เขียว = ผลตอบแทนเฉลี่ยต่อปี, แดง = ขาดทุนสูงสุดที่เคยเกิดขึ้น (Max Drawdown)")
 
-# ---------- นัยสำคัญทางสถิติ ----------
+
 st.subheader("ผลต่างระหว่างกลยุทธ์ เชื่อถือได้แค่ไหน (Paired t-test)")
 wide = df.pivot(index="round", columns="strategy", values="sharpe")
 rows = []
