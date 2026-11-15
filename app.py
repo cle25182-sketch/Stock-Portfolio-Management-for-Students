@@ -1,4 +1,5 @@
 import io
+import time
 from datetime import datetime, timedelta
 
 import matplotlib
@@ -35,7 +36,7 @@ STRAT_FULL_NAMES = {
     "equal": "A: Equal-weight (สัดส่วนเท่ากัน)",
     "markowitz": "B: Markowitz (สมการคณิตศาสตร์)",
     "mcap": "C: Market-cap (ตามมูลค่าบริษัท)",
-    "shrinkage": "D: Markowitz-Shrinkage (ลดสัญญาณรบกวน)",
+    "shrinkage": "D: Markowitz-Shrinkage (ลดสัญญาณรบกวนทั้ง Σ และ μ)",
 }
 STRAT_COLORS = {"equal": OLIVE, "markowitz": "#D9A441", "mcap": FOREST, "shrinkage": "#9B6B9E"}
 
@@ -143,34 +144,65 @@ def get_currency_info(tickers):
     return "USD / Mixed", "สกุลเงินผสม"
 
 
+# หมายเหตุ: ฟังก์ชันที่ติดแคช (_download_*, _fetch_*) จะ "raise" เมื่อดึงข้อมูลไม่ได้
+# เพราะ Streamlit ไม่แคชผลที่เป็น exception — ถ้าคืนค่าว่างแล้วถูกแคชไว้ ข้อผิดพลาดชั่วคราวจะค้างอยู่ 12 ชม.
+def _date_range(years_back):
+    end = datetime.today()
+    start = end - timedelta(days=int(years_back * 365.25))
+    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+
 @st.cache_data(ttl=43200, show_spinner=False)
-def load_price_data(tickers, years_back):
-    """ดึงราคาปิดปรับปันผล/แตกพาร์แล้ว (auto_adjust) พร้อมตัด timezone"""
+def _download_prices(tickers, years_back):
     import yfinance as yf
-    end_date = datetime.today().strftime("%Y-%m-%d")
-    start_date = (datetime.today() - timedelta(days=int(years_back * 365.25))).strftime("%Y-%m-%d")
+    start_date, end_date = _date_range(years_back)
+    raw = yf.download(list(tickers), start=start_date, end=end_date, progress=False, auto_adjust=True)["Close"]
+    if raw.empty:
+        raise ValueError("ไม่พบข้อมูลราคาหุ้นสำหรับรหัสที่ระบุ")
+    if isinstance(raw, pd.Series):
+        raw = raw.to_frame(tickers[0])
+    if getattr(raw.index, "tz", None) is not None:
+        raw.index = raw.index.tz_localize(None)
+    return raw.ffill()
+
+
+def load_price_data(tickers, years_back, min_obs=60):
+    """ดึงราคาปิดปรับปันผล/แตกพาร์แล้ว (auto_adjust) พร้อมตัด timezone
+    min_obs = จำนวนวันขั้นต่ำที่หุ้นแต่ละตัวต้องมี (ควรไม่น้อยกว่า Train+Test)"""
     try:
-        raw = yf.download(list(tickers), start=start_date, end=end_date, progress=False, auto_adjust=True)["Close"]
-        if raw.empty:
-            return None, [], "ไม่พบข้อมูลราคาหุ้นสำหรับรหัสที่ระบุ"
-        if isinstance(raw, pd.Series):
-            raw = raw.to_frame(tickers[0])
-        if getattr(raw.index, "tz", None) is not None:
-            raw.index = raw.index.tz_localize(None)
-        raw = raw.ffill()
-        valid = [t for t in tickers if t in raw.columns and raw[t].notna().sum() >= 30]
-        return raw[valid].dropna(), valid, None
+        raw = _download_prices(tuple(tickers), years_back)
     except Exception as e:
-        return None, [], f"ไม่สามารถเชื่อมต่อกับ Yahoo Finance ได้ในขณะนี้ ({e})"
+        return None, [], f"ไม่สามารถดึงข้อมูลจาก Yahoo Finance ได้ในขณะนี้ ({e})"
+    valid = [t for t in tickers if t in raw.columns and raw[t].notna().sum() >= min_obs]
+    if not valid:
+        return None, [], f"ไม่พบหุ้นที่มีข้อมูลอย่างน้อย {min_obs} วันทำการ"
+    return raw[valid].dropna(), valid, None
 
 
 @st.cache_data(ttl=43200, show_spinner=False)
+def _fetch_index(sym, years_back):
+    import yfinance as yf
+    start_date, end_date = _date_range(years_back)
+    raw = yf.download(sym, start=start_date, end=end_date, progress=False)
+    if raw.empty:
+        raise ValueError(f"no data for {sym}")
+    if isinstance(raw.columns, pd.MultiIndex):
+        lvl0 = raw.columns.get_level_values(0)
+        col = "Close" if "Close" in lvl0 else ("Adj Close" if "Adj Close" in lvl0 else None)
+        series = raw[col].iloc[:, 0] if col else raw.iloc[:, 0]
+    else:
+        col = "Close" if "Close" in raw.columns else ("Adj Close" if "Adj Close" in raw.columns else None)
+        series = raw[col] if col else raw.iloc[:, 0]
+    series = series.dropna()
+    if len(series) <= 10:
+        raise ValueError(f"too few rows for {sym}")
+    if getattr(series.index, "tz", None) is not None:
+        series.index = series.index.tz_localize(None)
+    return series
+
+
 def load_benchmark(bench_choice, tickers, years_back):
     """ดึงดัชนีอ้างอิง (ลองสัญลักษณ์สำรองตามลำดับ)"""
-    import yfinance as yf
-    end_date = datetime.today().strftime("%Y-%m-%d")
-    start_date = (datetime.today() - timedelta(days=int(years_back * 365.25))).strftime("%Y-%m-%d")
-
     symbol_map = {
         "🇹🇭 SET Index (หุ้นไทย)": (["^SET.BK", "TDEX.BK"], "SET Index"),
         "🇺🇸 S&P 500 (หุ้นใหญ่สหรัฐฯ)": (["^GSPC", "SPY"], "S&P 500"),
@@ -195,44 +227,57 @@ def load_benchmark(bench_choice, tickers, years_back):
 
     for sym in symbols:
         try:
-            raw = yf.download(sym, start=start_date, end=end_date, progress=False)
-            if raw.empty:
-                continue
-            if isinstance(raw.columns, pd.MultiIndex):
-                lvl0 = raw.columns.get_level_values(0)
-                col = "Close" if "Close" in lvl0 else ("Adj Close" if "Adj Close" in lvl0 else None)
-                series = raw[col].iloc[:, 0] if col else raw.iloc[:, 0]
-            else:
-                col = "Close" if "Close" in raw.columns else ("Adj Close" if "Adj Close" in raw.columns else None)
-                series = raw[col] if col else raw.iloc[:, 0]
-            series = series.dropna()
-            if len(series) > 10:
-                if getattr(series.index, "tz", None) is not None:
-                    series.index = series.index.tz_localize(None)
-                return series, sym, label
+            return _fetch_index(sym, years_back), sym, label
         except Exception:
             continue
     return pd.Series(dtype=float), symbols[0], label
 
 
+# จำนวนหุ้นจดทะเบียนสำรอง ใช้เมื่อ Yahoo ไม่ตอบ (ปล่อยว่างไว้ได้)
+# ถ้าจะเติม ให้ใช้ตัวเลขที่ตรวจจากเว็บไซต์ SET/งบการเงินเอง เช่น {"PTT.BK": 28_562_996_250}
+SHARES_FALLBACK = {}
+
+
 @st.cache_data(ttl=43200, show_spinner=False)
-def load_shares_outstanding(tickers):
-    """จำนวนหุ้นจดทะเบียน (ใช้ค่าปัจจุบันทุกรอบ — เป็นข้อจำกัดของข้อมูลฟรี)"""
+def _fetch_shares_one(t):
     import yfinance as yf
-    shares = {}
+    for attempt in range(3):
+        try:
+            tk = yf.Ticker(t)
+            s = None
+            try:
+                info = tk.info
+                s = _clean_shares(info.get("sharesOutstanding"))
+                if s is None:
+                    mc = info.get("marketCap")
+                    price = info.get("regularMarketPrice") or info.get("previousClose")
+                    if mc and price:
+                        s = _clean_shares(mc / price)
+            except Exception:
+                s = None
+            if s is None:
+                s = _clean_shares(getattr(tk.fast_info, "shares", None))
+            if s is not None:
+                return s
+        except Exception:
+            pass
+        time.sleep(1.0 * (attempt + 1))
+    raise RuntimeError(f"no shares data for {t}")
+
+
+def load_shares_outstanding(tickers):
+    """จำนวนหุ้นจดทะเบียน (ใช้ค่าปัจจุบันทุกรอบ — เป็นข้อจำกัดของข้อมูลฟรี)
+    คืน (dict จำนวนหุ้น, รายชื่อที่ต้องใช้ค่าสำรอง)"""
+    shares, used_fallback = {}, []
     for t in tickers:
         try:
-            info = yf.Ticker(t).info
-            s = info.get("sharesOutstanding")
-            if s is None:
-                mc = info.get("marketCap")
-                price = info.get("regularMarketPrice") or info.get("previousClose")
-                if mc and price:
-                    s = mc / price
-            shares[t] = s
+            shares[t] = _fetch_shares_one(t)
         except Exception:
-            shares[t] = None
-    return shares
+            fb = SHARES_FALLBACK.get(t)
+            shares[t] = fb
+            if fb is not None:
+                used_fallback.append(t)
+    return shares, used_fallback
 
 
 def _clean_shares(v):
@@ -244,22 +289,34 @@ def _clean_shares(v):
 
 # ─────────────────────────────  Portfolio maths  ─────────────────────────────
 def ledoit_wolf_shrinkage(X):
-    """Ledoit-Wolf covariance shrinkage (เป้าหมาย: เมทริกซ์ทแยงมุมเฉลี่ย)"""
+    """Ledoit-Wolf (2004) shrink เข้าหา μI (μ = ค่าเฉลี่ยของความแปรปรวนรายตัว)
+    δ = min(b², d²) / d²  โดย d² = ||S − μI||²_F และ b² = (1/T²) Σ_t ||x_t x_tᵀ − S||²_F"""
     T, N = X.shape
     Xc = X - X.mean(axis=0)
     S = (Xc.T @ Xc) / T
-    mu = np.trace(S) / N
-    F = mu * np.eye(N)
+    m = np.trace(S) / N
+    F = m * np.eye(N)
+    d2 = np.sum((S - F) ** 2)
+    if d2 <= 1e-18:
+        return S, 0.0
+    outer = np.einsum("ti,tj->tij", Xc, Xc)
+    b2 = np.sum((outer - S) ** 2) / T ** 2
+    delta = min(b2, d2) / d2
+    return delta * F + (1 - delta) * S, float(delta)
 
-    outer_all = np.einsum("ti,tj->tij", Xc, Xc)
-    pi_mat = ((outer_all - S) ** 2).mean(axis=0)
-    pi_hat = pi_mat.sum()
-    rho_hat = np.trace(pi_mat)
-    gamma_hat = np.sum((S - F) ** 2)
 
-    kappa_hat = (pi_hat - rho_hat) / gamma_hat if gamma_hat > 1e-18 else 0.0
-    delta = max(0.0, min(1.0, kappa_hat / T))
-    return delta * F + (1 - delta) * S, delta
+def shrink_mean(mu, cov, T):
+    """Bayes-Stein (Jorion, 1986): ดึงค่าเฉลี่ยผลตอบแทนเข้าหาค่าเฉลี่ยของพอร์ต Min-Variance
+    λ = (N+2) / ((N+2) + T·(μ−μ₀1)ᵀΣ⁻¹(μ−μ₀1))  — ข้อมูลยิ่งน้อย/μ กระจายยิ่งมาก λ ยิ่งสูง"""
+    N = len(mu)
+    inv = np.linalg.pinv(cov)
+    ones = np.ones(N)
+    mu0 = float(ones @ inv @ mu) / float(ones @ inv @ ones)
+    d = mu - mu0 * ones
+    quad = float(d @ inv @ d)
+    lam = (N + 2) / ((N + 2) + T * quad) if quad > 1e-18 else 1.0
+    lam = float(np.clip(lam, 0.0, 1.0))
+    return (1 - lam) * mu + lam * mu0 * ones, lam
 
 
 def _clean_w(w, fallback):
@@ -268,32 +325,70 @@ def _clean_w(w, fallback):
     return fallback if (not np.isfinite(s) or s <= 1e-12) else w / s
 
 
-def get_weights(train_ret, train_last_price, shares_arr, n, use_marketcap, rf_rate):
-    """คำนวณน้ำหนักพอร์ตของแต่ละกลยุทธ์จากข้อมูลช่วง Train เท่านั้น"""
-    mu, cov = train_ret.mean().values, train_ret.cov().values
-    w_equal = np.full(n, 1.0 / n)
+def _max_sharpe(mu, cov, rf_rate, w0, rng, n_starts=8):
+    """Max-Sharpe (long-only) ด้วย SLSQP หลายจุดเริ่มต้น (Sharpe ไม่ใช่ปัญหา convex) คืนผลที่ดีที่สุดหรือ None"""
+    n = len(mu)
 
-    def neg_sharpe(w, mu_arr, cov_arr):
-        ret = float(mu_arr @ w) * 252 - rf_rate
-        vol = np.sqrt(max(float(w @ cov_arr @ w), 0.0)) * np.sqrt(252)
+    def neg_sharpe(w):
+        ret = float(mu @ w) * 252 - rf_rate
+        vol = np.sqrt(max(float(w @ cov @ w), 0.0)) * np.sqrt(252)
         return -ret / vol if vol > 1e-10 else 1e6
 
     bounds = tuple((0, 1) for _ in range(n))
     cons = {"type": "eq", "fun": lambda w: np.sum(w) - 1}
+    starts = [w0] + list(rng.dirichlet(np.ones(n), size=n_starts))
+    best = None
+    for s in starts:
+        r = minimize(neg_sharpe, s, method="SLSQP", bounds=bounds, constraints=cons)
+        if r.success and np.isfinite(r.fun) and (best is None or r.fun < best.fun):
+            best = r
+    return best
 
-    opt = minimize(neg_sharpe, w_equal, args=(mu, cov), method="SLSQP", bounds=bounds, constraints=cons)
-    w_markowitz = _clean_w(opt.x, w_equal) if opt.success else w_equal
+
+def _min_variance(cov, w0):
+    """Min-Variance (long-only) — ใช้เมื่อผลตอบแทนคาดหวังของทุกหุ้นไม่เกิน Rf (ซึ่ง Max-Sharpe ใช้ไม่ได้)"""
+    n = len(w0)
+    C = cov * 1e4   # สเกลให้ตัวแก้ปัญหาเห็นค่าไม่เล็กเกินไป
+    r = minimize(lambda w: float(w @ C @ w), w0, jac=lambda w: 2 * C @ w, method="SLSQP",
+                 bounds=tuple((0, 1) for _ in range(n)), constraints={"type": "eq", "fun": lambda w: np.sum(w) - 1})
+    return r
+
+
+def get_weights(train_ret, train_last_price, shares_arr, n, use_marketcap, rf_rate):
+    """คำนวณน้ำหนักพอร์ตของแต่ละกลยุทธ์จากข้อมูลช่วง Train เท่านั้น
+    คืน (weights, info) โดย info มี ok / mv_fallback / delta / lam"""
+    mu, cov = train_ret.mean().values, train_ret.cov().values
+    T = len(train_ret)
+    w_equal = np.full(n, 1.0 / n)
+    rng = np.random.default_rng(42)   # ตายตัว เพื่อให้ผลซ้ำได้
+    info = {"ok": True, "mv_fallback": 0}
+
+    def solve(mu_arr, cov_arr):
+        # Max-Sharpe ต้องมีอย่างน้อยหนึ่งหุ้นที่ผลตอบแทนคาดหวังเกิน Rf
+        # ไม่งั้นการ "ทำให้ Sharpe สูงสุด" จะกลายเป็นเลือกพอร์ตที่ผันผวนสุด (ตัวเศษติดลบ)
+        if (mu_arr * 252 - rf_rate).max() <= 0:
+            info["mv_fallback"] += 1
+            r = _min_variance(cov_arr, w_equal)
+            ok = bool(r.success)
+        else:
+            r = _max_sharpe(mu_arr, cov_arr, rf_rate, w_equal, rng)
+            ok = r is not None
+        info["ok"] = info["ok"] and ok
+        return _clean_w(r.x, w_equal) if ok else w_equal
+
+    w_markowitz = solve(mu, cov)
 
     shrunk_cov, delta = ledoit_wolf_shrinkage(train_ret.values)
-    opt_s = minimize(neg_sharpe, w_equal, args=(mu, shrunk_cov), method="SLSQP", bounds=bounds, constraints=cons)
-    w_shrink = _clean_w(opt_s.x, w_equal) if opt_s.success else w_equal
+    mu_s, lam = shrink_mean(mu, shrunk_cov, T)
+    w_shrink = solve(mu_s, shrunk_cov)
+    info["delta"], info["lam"] = delta, lam
 
     weights = {"equal": w_equal, "markowitz": w_markowitz}
     if use_marketcap and shares_arr is not None and len(shares_arr) == n:
         mcap = np.asarray(train_last_price, dtype=float) * np.asarray(shares_arr, dtype=float)
         weights["mcap"] = mcap / mcap.sum() if mcap.sum() > 0 else w_equal
     weights["shrinkage"] = w_shrink
-    return weights, bool(opt.success and opt_s.success), delta
+    return weights, info
 
 
 def evaluate(r, rf_rate):
@@ -318,7 +413,7 @@ def run_walk_forward(data, shares_arr, use_marketcap, train_window, test_window,
     """Walk-Forward + จำลองการถือครองจริง: ซื้อครั้งแรก, ปล่อยน้ำหนักลอยตามราคา, ปรับพอร์ตทุกรอบ และหักค่าธรรมเนียมตามยอดซื้อ+ขายจริง"""
     all_returns = data.pct_change().dropna()
     n, cols = data.shape[1], list(data.columns)
-    records, failed, deltas = [], 0, []
+    records, failed, deltas, lams, mv_fallbacks = [], 0, [], [], 0
     equity, holdings, total_cost = {}, {}, {}
     net_parts, curve_parts, weight_rows = {}, {}, {}
     start, round_num = 0, 0
@@ -328,9 +423,11 @@ def run_walk_forward(data, shares_arr, use_marketcap, train_window, test_window,
         train_ret = all_returns.iloc[start: start + train_window]
         test_ret = all_returns.iloc[start + train_window: start + train_window + test_window]
         train_last_price = data.loc[train_ret.index[-1]].values
-        weights, ok, delta = get_weights(train_ret, train_last_price, shares_arr, n, use_marketcap, rf_rate)
-        failed += 0 if ok else 1
-        deltas.append(delta)
+        weights, info = get_weights(train_ret, train_last_price, shares_arr, n, use_marketcap, rf_rate)
+        failed += 0 if info["ok"] else 1
+        mv_fallbacks += info["mv_fallback"]
+        deltas.append(info["delta"])
+        lams.append(info["lam"])
         growth = np.cumprod(1 + test_ret.values, axis=0)   # T x n
 
         for key, w in weights.items():
@@ -358,7 +455,7 @@ def run_walk_forward(data, shares_arr, use_marketcap, train_window, test_window,
         return None
 
     # สัดส่วนที่ "ใช้ได้จริงตอนนี้" คำนวณจากข้อมูล Train ล่าสุด (ไม่ใช่ของรอบทดสอบสุดท้าย)
-    current_weights, _, _ = get_weights(all_returns.iloc[-train_window:], data.iloc[-1].values,
+    current_weights, _ = get_weights(all_returns.iloc[-train_window:], data.iloc[-1].values,
                                         shares_arr, n, use_marketcap, rf_rate)
     return {
         "folds": pd.DataFrame(records),
@@ -369,6 +466,8 @@ def run_walk_forward(data, shares_arr, use_marketcap, train_window, test_window,
         "weight_history": {k: pd.DataFrame(v).set_index("round") for k, v in weight_rows.items()},
         "total_cost": total_cost,
         "avg_delta": float(np.mean(deltas)),
+        "avg_lambda": float(np.mean(lams)),
+        "n_mv_fallback": mv_fallbacks,
         "returns": all_returns,
         "current_weights": current_weights,
     }
@@ -378,6 +477,7 @@ def paired_tests(folds, order):
     """Paired t-test ของ Sharpe ต่อรอบ ระหว่างทุกคู่กลยุทธ์ + ช่วงความเชื่อมั่น 95% ของค่าเฉลี่ย"""
     piv = folds.pivot(index="round", columns="strategy", values="sharpe")[order]
     rows = []
+    m_tests = len(order) * (len(order) - 1) // 2   # จำนวนคู่ที่เปรียบเทียบ (ใช้ปรับ Bonferroni)
     for i in range(len(order)):
         for j in range(i + 1, len(order)):
             a, b = order[i], order[j]
@@ -391,7 +491,9 @@ def paired_tests(folds, order):
                 t_stat, p_val = stats.ttest_rel(pair[a], pair[b])
             rows.append({"คู่เปรียบเทียบ": f"{STRAT_DISPLAY_NAMES[a]}  vs  {STRAT_DISPLAY_NAMES[b]}",
                          "ส่วนต่าง Sharpe เฉลี่ย": diff.mean(), "t": t_stat, "p-value": p_val,
-                         "ผล (α = 0.05)": "ต่างกันอย่างมีนัยสำคัญ" if p_val < 0.05 else "ไม่ต่างอย่างมีนัยสำคัญ"})
+                         "p (Bonferroni)": min(1.0, p_val * m_tests),
+                         "ผล (p ดิบ < 0.05)": "ต่างกัน" if p_val < 0.05 else "ไม่ต่างกัน",
+                         "ผล (หลังปรับ Bonferroni)": "ต่างกัน" if p_val * m_tests < 0.05 else "ไม่ต่างกัน"})
     ci = {}
     for k in order:
         s = piv[k].dropna()
@@ -478,8 +580,10 @@ with st.sidebar:
         rf_rate_pct = st.slider("อัตราผลตอบแทนปราศจากความเสี่ยง Rf (%/ปี)", 0.0, 5.0, 0.0, step=0.25) / 100
         train_window = st.slider("ช่วง Train (วันทำการ)", 126, 378, 252, step=21)
         test_window = st.slider("ช่วง Test ต่อรอบ (วันทำการ)", 21, 126, 63, step=21)
-        years_back = st.slider("ข้อมูลย้อนหลัง (ปี)", 3, 25, 6)
-        cost_pct = st.slider("ค่าธรรมเนียมซื้อขาย (% ของยอดที่ซื้อ/ขาย)", 0.0, 1.0, 0.1, step=0.05) / 100
+        years_back = st.slider("ข้อมูลย้อนหลัง (ปี)", 3, 25, 9,
+                               help="ช่วงทดสอบจริงเริ่มหลังช่วง Train แรก (≈1 ปี) · ย้อนหลัง 9 ปีจึงครอบคลุมช่วง COVID-19 และมีรอบทดสอบมากพอสำหรับ t-test")
+        cost_pct = st.slider("ค่าธรรมเนียมซื้อขาย (% ของยอดที่ซื้อ/ขาย)", 0.0, 1.0, 0.15, step=0.05,
+                             help="ตั้งตามโบรกเกอร์ที่ใช้จริง (รวม VAT) · โมเดลยังไม่รวมค่าธรรมเนียมขั้นต่ำต่อรายการ") / 100
         stress_option = st.selectbox("ดูผลเฉพาะช่วงวิกฤต", ["ไม่ระบุ"] + list(STRESS_WINDOWS.keys()))
 
     if st.button("เริ่มวิเคราะห์", type="primary"):
@@ -504,7 +608,7 @@ if len(selected) < 2:
 
 # ─────────────────────────────  Compute  ─────────────────────────────
 with st.spinner("กำลังดึงราคาหุ้นและประมวลผล..."):
-    data, valid_tickers, error_msg = load_price_data(tuple(selected), years_back)
+    data, valid_tickers, error_msg = load_price_data(tuple(selected), years_back, train_window + test_window + 2)
     if error_msg:
         st.error(f"ดึงข้อมูลไม่สำเร็จ: {error_msg}")
         st.stop()
@@ -516,7 +620,14 @@ with st.spinner("กำลังดึงราคาหุ้นและปร
         st.error("เหลือหุ้นที่ข้อมูลสมบูรณ์น้อยกว่า 2 ตัว กรุณาเปลี่ยนรหัสหุ้น")
         st.stop()
 
-    shares_raw = load_shares_outstanding(tuple(selected))
+    expected_days = years_back * 252 * 0.9
+    if len(data) < 0.7 * expected_days:
+        st.warning(f"ข้อมูลที่ทุกหุ้นมีร่วมกันเหลือเพียง {len(data):,} วันทำการ (น้อยกว่าที่ขอย้อนหลัง {years_back} ปีมาก) "
+                   "หุ้นบางตัวอาจเพิ่งจดทะเบียน ผลทดสอบจึงสั้นลง")
+
+    shares_raw, shares_fb = load_shares_outstanding(tuple(selected))
+    if shares_fb:
+        st.warning(f"ดึงจำนวนหุ้นของ {', '.join(shares_fb)} จาก Yahoo ไม่ได้ จึงใช้ค่าสำรองในโค้ด (SHARES_FALLBACK)")
     shares_clean = {t: _clean_shares(shares_raw.get(t)) for t in selected}
     use_marketcap = all(v is not None for v in shares_clean.values())
     shares_arr = np.array([shares_clean[t] for t in selected]) if use_marketcap else None
@@ -558,6 +669,9 @@ with tab1:
     st.caption(f"ทดสอบนอกตัวอย่าง {res['n_folds']} รอบ ช่วง {idx[0]:%d/%m/%Y} – {idx[-1]:%d/%m/%Y} (ราว {years_oos:.1f} ปี) หลังหักค่าธรรมเนียมแล้ว")
     if res["n_failed"] > 0:
         st.warning(f"คำนวณ Markowitz ไม่ลู่เข้า {res['n_failed']}/{res['n_folds']} รอบ (ใช้ Equal-Weight แทนในรอบนั้น)")
+    if res["n_mv_fallback"] > 0:
+        st.info(f"มี {res['n_mv_fallback']} ครั้ง (รวมกลยุทธ์ B และ D) ที่ผลตอบแทนคาดหวังของทุกหุ้นในช่วง Train ไม่เกิน Rf "
+                "Max-Sharpe ใช้ไม่ได้ในกรณีนี้ ระบบจึงใช้พอร์ตความเสี่ยงต่ำสุด (Min-Variance) แทนในรอบนั้น")
 
     if best["cagr"] > inflation:
         html(f"""<div class="verdict">กลยุทธ์ที่ Sharpe ดีที่สุดคือ <b>{STRAT_FULL_NAMES[best_key]}</b> ให้ผลตอบแทนทบต้น <b>{pct(best['cagr'])}</b> ต่อปี
@@ -602,7 +716,8 @@ with tab1:
                      f"เงินสุดท้าย ({curr_code})": f"{capital * (1 + bench_metrics['total']):,.0f}",
                      "ค่าธรรมเนียมรวม": "–", "ชนะเงินเฟ้อ": "✅" if bench_metrics["cagr"] > inflation else "❌"})
     st.dataframe(pd.DataFrame(rows), hide_index=True)
-    st.caption("ผลในอดีตไม่รับประกันผลในอนาคต และไม่ใช่คำแนะนำการลงทุน")
+    st.caption("“กลยุทธ์ที่ดีที่สุด” เลือกย้อนหลังจากผลทดสอบชุดเดียวกัน ไม่ใช่การพยากรณ์ว่าจะดีที่สุดต่อไป · "
+               "ผลในอดีตไม่รับประกันผลในอนาคต และไม่ใช่คำแนะนำการลงทุน")
 
 with tab2:
     st.subheader(f"เงินลงทุนสะสม ({curr_code}) — ทบต้นจริง หลังหักค่าธรรมเนียม")
@@ -652,13 +767,16 @@ with tab3:
         show["ส่วนต่าง Sharpe เฉลี่ย"] = show["ส่วนต่าง Sharpe เฉลี่ย"].round(3)
         show["t"] = show["t"].round(3)
         show["p-value"] = show["p-value"].round(4)
+        show["p (Bonferroni)"] = show["p (Bonferroni)"].round(4)
         st.dataframe(show, hide_index=True)
-        st.caption(f"n = {res['n_folds']} รอบ · รอบละไม่กี่เดือน ข้อมูลน้อย ผลจึงควรอ่านอย่างระมัดระวัง และการทดสอบหลายคู่พร้อมกันเพิ่มโอกาสพบความต่างโดยบังเอิญ")
+        st.caption(f"n = {res['n_folds']} รอบ · เปรียบเทียบ {len(show)} คู่พร้อมกัน จึงแสดง p ที่ปรับแบบ Bonferroni (p × จำนวนคู่) คู่กับ p ดิบ · "
+                   "รอบละไม่กี่เดือน ข้อมูลน้อย ผลจึงควรอ่านอย่างระมัดระวัง")
 
     col_a, col_b = st.columns(2)
     with col_a:
-        st.markdown("#### ความเข้มของการลดสัญญาณรบกวน (Ledoit-Wolf δ)")
-        st.info(f"ค่าเฉลี่ย δ ตลอดการทดสอบ = **{res['avg_delta']:.4f}**\n\nδ ใกล้ 1 แปลว่าเมทริกซ์ความแปรปรวนร่วมจากข้อมูล Train มีสัญญาณรบกวนมาก ระบบจึงถ่วงน้ำหนักเข้าหาเป้าหมายที่เรียบกว่า")
+        st.markdown("#### ความเข้มของการลดสัญญาณรบกวน (กลยุทธ์ D)")
+        st.info(f"Ledoit-Wolf δ (ของ Σ) เฉลี่ย = **{res['avg_delta']:.4f}** · Bayes-Stein λ (ของ μ) เฉลี่ย = **{res['avg_lambda']:.4f}**\n\n"
+                "ค่ายิ่งใกล้ 1 แปลว่าค่าประมาณจากข้อมูล Train มีสัญญาณรบกวนมาก ระบบจึงถ่วงเข้าหาเป้าหมายที่เรียบกว่า")
     with col_b:
         st.markdown("#### Max Drawdown ตลอดช่วงทดสอบ")
         mdd_df = pd.DataFrame({"Max Drawdown": [pct(overall[k]["max_drawdown"]) for k in order]},
@@ -726,7 +844,11 @@ with tab5:
 - **ค่าธรรมเนียม:** หักจากยอดที่ซื้อและขายจริงในแต่ละรอบ (รวมการซื้อครั้งแรก) โดยน้ำหนักลอยตามราคาระหว่างรอบ
 - **ผลตอบแทนทบต้น (CAGR):** ใช้ตัดสินว่าชนะเงินเฟ้อหรือไม่ ส่วน “ผลตอบแทนเฉลี่ย/ปี” คือค่าเฉลี่ยรายวัน × 252 ตามนิยามในโครงร่าง
 - **ราคาหุ้น:** ใช้ราคาปรับปันผลและแตกพาร์แล้ว (รวมปันผล) แต่ดัชนีอ้างอิงบางตัวเป็น Price Index ไม่รวมปันผล จึงเทียบได้แบบคร่าว ๆ
-- **Market-Cap:** ใช้จำนวนหุ้นจดทะเบียนปัจจุบันคูณราคาปิดวันสิ้นสุด Train เพราะข้อมูลฟรีไม่มีจำนวนหุ้นย้อนหลัง
+- **Market-Cap:** ใช้จำนวนหุ้นจดทะเบียนปัจจุบันคูณราคาปิดวันสิ้นสุด Train เพราะข้อมูลฟรีไม่มีจำนวนหุ้นย้อนหลัง อีกทั้งราคาเป็นราคาปรับปันผลแล้ว (ราคาเก่าถูกปรับลดตามปันผลสะสม) และไม่ได้ปรับ free-float เหมือนดัชนี SET50 จึงเป็นเพียงการประมาณการถ่วงตามมูลค่าตลาด
+- **Markowitz (B):** หาน้ำหนักที่ทำให้ Sharpe สูงสุดแบบห้าม short ด้วย SLSQP หลายจุดเริ่มต้น (สุ่มแบบตายตัวเพื่อให้ผลซ้ำได้) · ถ้าผลตอบแทนคาดหวังของทุกหุ้นไม่เกิน Rf จะใช้ Min-Variance แทน เพราะ Max-Sharpe ไม่มีความหมายเมื่อตัวเศษติดลบ
+- **Markowitz-Shrinkage (D):** ลดสัญญาณรบกวนทั้ง Σ (Ledoit-Wolf, เป้าหมาย μI) และ μ (Bayes-Stein ของ Jorion แบบง่าย) ก่อนหาน้ำหนักด้วยวิธีเดียวกับ B
+- **การทดสอบทางสถิติ:** Paired t-test ของ Sharpe ต่อรอบ แสดงทั้ง p ดิบและ p ที่ปรับ Bonferroni เพราะเปรียบเทียบหลายคู่พร้อมกัน
+- **กลยุทธ์ที่ดีที่สุด:** เลือกย้อนหลังจากผลทดสอบชุดเดียวกัน จึงไม่ใช่การพยากรณ์
 - **สกุลเงิน:** ตรวจจากท้ายรหัสหุ้น (.BK = บาท, .T = เยน, .HK = ดอลลาร์ฮ่องกง, ไม่มี = ดอลลาร์สหรัฐ)
 """)
 
