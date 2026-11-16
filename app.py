@@ -1,4 +1,4 @@
-🤪😉😘😉😉😘😘😇😘😉😘🫠😘😇😊🫠😘🥲😊😄😘🥲😊😄😘🥲😊🫠🤩🥲😊🤩🫠🥰😊🫠🤩🥰😊🫠🤩import io
+import io
 import time
 from html import escape as esc
 from datetime import datetime, timedelta
