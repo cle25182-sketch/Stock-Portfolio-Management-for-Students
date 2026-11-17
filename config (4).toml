@@ -1,0 +1,15 @@
+[theme]
+base = "light"
+primaryColor = "#161D39"
+backgroundColor = "#F8F5F0"
+secondaryBackgroundColor = "#EDE6D8"
+textColor = "#161D39"
+font = "sans serif"
+
+[theme.sidebar]
+backgroundColor = "#161D39"
+secondaryBackgroundColor = "#222B52"
+textColor = "#F8F5F0"
+# สีแถบเลื่อนในแถบซ้าย: ตั้งเป็นสีแดงมาตรฐานของ Streamlit ไว้โดยตั้งใจ
+# โค้ดใน app.py จะย้อมให้เป็นสีทองเองไม่ว่าไฟล์นี้จะถูกอ่านหรือไม่
+primaryColor = "#FF4B4B"
