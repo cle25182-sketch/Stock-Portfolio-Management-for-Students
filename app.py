@@ -239,6 +239,9 @@ table.qt { width: 100%; border-collapse: collapse; font-size: .98rem; font-famil
 .gl-short { font-family: var(--f-serif); font-size: 1.14rem; line-height: 1.85; color: var(--navy); margin: 14px 0 6px; }
 .gl-row { margin: 9px 0; line-height: 1.85; font-size: 1.02rem; }
 .gl-row b { display: inline-block; font-size: .74rem; letter-spacing: .04em; color: var(--gold); border: 1px solid var(--line); padding: 0 8px; margin-right: 10px; font-weight: 600; line-height: 1.7; vertical-align: 1px; }
+.gl-vis { margin: 12px 0 8px; background: var(--oat); border: 1px solid var(--line); padding: 12px 10px 8px; }
+.gv { display: block; width: 100%; max-width: 540px; height: auto; margin: 0 auto; }
+.gv text { font-family: var(--f-body); }
 .gl-empty { padding: 26px; text-align: center; color: var(--muted); border: 1px dashed var(--line); background: var(--ivory); }
 
 @media (max-width: 900px) {
@@ -280,9 +283,12 @@ def show_table(df, hl=None):
 
 
 try:
-    from glossary import GLOSSARY, GLOSSARY_CATS
+    from glossary import GLOSSARY, GLOSSARY_CATS, visual
 except Exception:
     GLOSSARY, GLOSSARY_CATS = [], []
+
+    def visual(key):
+        return ""
 G = {g["key"]: g for g in GLOSSARY}
 
 
@@ -307,19 +313,22 @@ def term_chips(keys, title="ศัพท์ในส่วนนี้ · แต
         st.markdown(f'<div class="chips"><span class="chips-h">{esc(title)}</span>{chips}</div>', unsafe_allow_html=True)
 
 
-def glossary_cards(items, open_all=False):
+def glossary_cards(items, open_all=False, open_first=False):
     out = []
-    for g in items:
-        rows = [("อธิบายง่าย ๆ", g["plain"]), ("เปรียบเทียบ", g.get("analogy")),
-                ("อ่านค่ายังไง", g.get("read")), ("ในเว็บนี้", g.get("where"))]
+    for n, g in enumerate(items):
+        rows = [("พูดง่าย ๆ", g.get("easy")), ("ลองนึกภาพ", g.get("story")), ("ตัวอย่าง", g.get("example")),
+                ("ควรรู้", g.get("why")), ("อ่านค่ายังไง", g.get("read")), ("ดูในเว็บ", g.get("where"))]
         body = "".join(f'<div class="gl-row"><b>{lab}</b>{esc(txt)}</div>' for lab, txt in rows if txt)
-        out.append(f'<details class="gl-card"{" open" if open_all else ""}><summary><span class="gl-en">{esc(g["en"])}</span>'
+        vis = visual(g["key"])
+        vis = f'<div class="gl-vis">{vis}</div>' if vis else ""
+        is_open = open_all or (open_first and n == 0)
+        out.append(f'<details class="gl-card"{" open" if is_open else ""}><summary><span class="gl-en">{esc(g["en"])}</span>'
                    f'<span class="gl-th">{esc(g["th"])}</span><span class="gl-cat">{esc(g["cat"])}</span></summary>'
-                   f'<div class="gl-body"><div class="gl-short">{esc(g["short"])}</div>{body}</div></details>')
+                   f'<div class="gl-body"><div class="gl-short">{esc(g["short"])}</div>{vis}{body}</div></details>')
     return "".join(out)
 
 
-def render_glossary(prefix):
+def render_glossary(prefix, open_first=False):
     """ช่องค้นหา + กรองหมวด + การ์ดความหมายแบบกดเปิด/ปิด"""
     if not GLOSSARY:
         st.info("ยังไม่พบไฟล์คำศัพท์ (glossary.py) — อัปโหลดไฟล์นี้ไว้ข้าง app.py เพื่อเปิดใช้งาน")
@@ -333,7 +342,8 @@ def render_glossary(prefix):
         if cat != "ทั้งหมด" and g["cat"] != cat:
             continue
         names = " ".join([g["en"], g["th"], g["chip"], " ".join(g.get("aliases", []))]).lower()
-        body = " ".join([g["short"], g["plain"], g.get("analogy", ""), g.get("read", ""), g.get("where", "")]).lower()
+        body = " ".join([g["short"], g.get("easy", ""), g.get("story", ""), g.get("example", ""), g.get("why", ""),
+                         g.get("read", ""), g.get("where", "")]).lower()
         if tokens and not all(t in names or t in body for t in tokens):
             continue
         if not tokens:
@@ -348,7 +358,7 @@ def render_glossary(prefix):
     items = [g for _, g in sorted(items, key=lambda x: x[0])] if tokens else [g for _, g in items]
     st.markdown(f'<div class="gl-count">พบ {len(items)} คำ · กดที่ชื่อคำเพื่อเปิดอ่าน</div>', unsafe_allow_html=True)
     if items:
-        st.markdown(glossary_cards(items, open_all=bool(tokens) and len(items) <= 3), unsafe_allow_html=True)
+        st.markdown(glossary_cards(items, open_all=bool(tokens) and len(items) <= 3, open_first=open_first and not tokens), unsafe_allow_html=True)
     else:
         st.markdown('<div class="gl-empty">ไม่พบคำนี้ ลองพิมพ์ให้สั้นลง หรือเลือกหมวด “ทั้งหมด”</div>', unsafe_allow_html=True)
 
@@ -873,7 +883,7 @@ if not st.session_state.get("has_run"):
     st.info("ตั้งค่าทางซ้ายมือ แล้วกด **เริ่มวิเคราะห์** เพื่อประมวลผล (ค่าเริ่มต้นคือหุ้นไทย 5 ตัวตามโครงร่าง เงินตั้งต้น 5,000 บาท)")
     st.subheader("คำศัพท์ที่ควรรู้ก่อนเริ่ม")
     st.caption("ไม่เคยลงทุนก็อ่านได้ — พิมพ์ค้นหาคำที่สงสัย หรือกดเปิดอ่านทีละคำ")
-    render_glossary("gw")
+    render_glossary("gw", open_first=True)
     st.stop()
 
 html(f"""
@@ -1148,6 +1158,8 @@ with tab4:
 
 with tab5:
     st.subheader("วิธีคำนวณและข้อจำกัด")
+    st.markdown("**ภาพรวมวิธีทดสอบ (Walk-Forward) แบบเห็นภาพ**")
+    st.markdown(f'<div class="gl-vis">{visual("walk_forward")}</div>', unsafe_allow_html=True)
     st.markdown("""
 - **Walk-Forward Validation:** คำนวณสัดส่วนจากช่วง Train แล้วนำไปใช้กับช่วง Test ถัดไปที่ไม่เคยใช้คำนวณ จากนั้นเลื่อนไปข้างหน้า ป้องกัน Look-ahead bias
 - **ตัวชี้วัดรวม:** Sharpe, ความผันผวน และ Max Drawdown ในตารางสรุปคิดจากกราฟเงินทุนที่ต่อกันตลอดทุกรอบ ส่วน t-test ใช้ Sharpe ต่อรอบ
